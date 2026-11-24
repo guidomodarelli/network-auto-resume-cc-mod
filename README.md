@@ -56,6 +56,10 @@ claude plugin validate .
 claude plugin test .
 ```
 
+## Validación
+
+Lo comprobado fuera de los tests, con una API simulada y con CLI Proxy API real, está en [docs/validation.md](docs/validation.md), junto con sus límites.
+
 ## Licencia
 
 MIT. Ver [LICENSE](LICENSE).
