@@ -2,5 +2,6 @@
   "name": "network-auto-resume-cc-mod",
   "version": "0.1.0",
   "description": "Reanuda solo el turno cuando la respuesta se corta por un error de red o de la API (mid-response, Waiting for Network agotado), con backoff y tope de reintentos.",
+  "license": "MIT",
   "types": "./types/index.d.ts"
 }

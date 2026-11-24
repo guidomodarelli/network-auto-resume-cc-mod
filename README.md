@@ -41,3 +41,7 @@ claude --plugin-dir <carpeta del mod>
 claude plugin validate .
 claude plugin test .
 ```
+
+## Licencia
+
+MIT. Ver [LICENSE](LICENSE).
