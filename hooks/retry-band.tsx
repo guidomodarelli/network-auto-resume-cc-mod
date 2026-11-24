@@ -33,7 +33,7 @@ export function RetryBand({
   const message =
     banner.kind === 'resending'
       ? `${EMOJI.resending} Petición fallida: reenviando ${progress}`
-      : `${EMOJI.waiting} Respuesta cortada: "go" ${progress} en ${secondsUntil(banner.dueAtMs, nowMs)} s`
+      : `${EMOJI.waiting} Respuesta cortada: reintento ${progress} en ${secondsUntil(banner.dueAtMs, nowMs)} s`
 
   return (
     <Box flexDirection="row" gap={1}>

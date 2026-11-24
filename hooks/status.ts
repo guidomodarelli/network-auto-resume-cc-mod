@@ -12,7 +12,7 @@ export type StatusSnapshot = {
   isEnabled: boolean
   consecutiveRetries: number
   maxRetries: number
-  /** Segundos hasta el `go` programado; null sin `go` pendiente. */
+  /** Segundos hasta el reintento programado; null sin reintento pendiente. */
   pendingRetryInSeconds: number | null
   /** Tipo del último error del turno principal; null si no hubo. */
   lastErrorKind: string | null
@@ -33,8 +33,8 @@ const RETRYABLE_NOTE = 'se reintenta'
 const NON_RETRYABLE_NOTE = 'no se reintenta'
 
 const ENABLED_LINE = /^- Reanudación automática: (activada|desactivada)$/m
-const RETRIES_LINE = /^- "go" seguidos: (\d+)\/(\d+)$/m
-const PENDING_LINE = /^- "go" pendiente: (?:no|en (\d+) s)$/m
+const RETRIES_LINE = /^- Reintentos seguidos: (\d+)\/(\d+)$/m
+const PENDING_LINE = /^- Reintento pendiente: (?:no|en (\d+) s)$/m
 const ERROR_LINE = /^- Último error: (?:ninguno|([a-z_]+) \((se reintenta|no se reintenta)\))$/m
 const TOGGLE_LINE = /^Reanudación automática (activada|desactivada)\.$/
 
@@ -54,8 +54,8 @@ export function formatStatusText(snapshot: StatusSnapshot): string {
   return [
     `**${STATUS_TITLE}**`,
     `- Reanudación automática: ${snapshot.isEnabled ? ENABLED_WORD : DISABLED_WORD}`,
-    `- "go" seguidos: ${snapshot.consecutiveRetries}/${snapshot.maxRetries}`,
-    `- "go" pendiente: ${pendingText}`,
+    `- Reintentos seguidos: ${snapshot.consecutiveRetries}/${snapshot.maxRetries}`,
+    `- Reintento pendiente: ${pendingText}`,
     `- Último error: ${errorText}`,
   ].join('\n')
 }

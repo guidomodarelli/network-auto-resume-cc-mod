@@ -45,7 +45,9 @@ function setUpEngine(on: On) {
     return { value: undefined }
   })
   on('prompt.submit', (_, e) => {
-    submittedTexts.push(e.text)
+    // El mensaje del mod se anota como `resume`, así los tests no dependen de
+    // su redacción, solo de que pida seguir sin repetir.
+    submittedTexts.push(/Seguí donde quedaste sin repetir lo que ya hiciste/.test(e.text) ? 'resume' : e.text)
     return { text: e.text }
   })
   on('turn.start', (_, e) => ({ turnId: e.turnId }))
@@ -55,7 +57,7 @@ function setUpEngine(on: On) {
   return { clock, submittedTexts, toasts }
 }
 
-test('un turno que termina en error manda "go" al segundo', async ($, on) => {
+test('un turno que termina en error pide seguir al segundo', async ($, on) => {
   const { clock, submittedTexts } = setUpEngine(on)
 
   await $.turn.complete(ERRORED_TURN)
@@ -63,7 +65,7 @@ test('un turno que termina en error manda "go" al segundo', async ($, on) => {
   expect(submittedTexts).toEqual([])
 
   await clock.advance(1)
-  expect(submittedTexts).toEqual(['go'])
+  expect(submittedTexts).toEqual(['resume'])
 })
 
 test('el backoff se duplica y se rinde tras el tope de reintentos', async ($, on) => {
@@ -89,10 +91,10 @@ test('un turno que termina bien reinicia el contador', async ($, on) => {
 
   await $.turn.complete(ERRORED_TURN)
   await clock.advance(FIRST_GO_DELAY_MS)
-  expect(submittedTexts).toEqual(['go', 'go'])
+  expect(submittedTexts).toEqual(['resume', 'resume'])
 })
 
-test('un prompt del usuario o Esc cancelan el "go" pendiente', async ($, on) => {
+test('un prompt del usuario o Esc cancelan el reintento pendiente', async ($, on) => {
   const { clock, submittedTexts } = setUpEngine(on)
 
   await $.turn.complete(ERRORED_TURN)
@@ -196,35 +198,7 @@ test('los reenvíos dentro del turno tienen tope', async ($, on) => {
   expect(requestsSent).toBe(3)
 })
 
-test('el system prompt explica qué es un "go" del mod, salvo con el mod apagado', async ($, on) => {
-  setUpEngine(on)
-  on('prompt.compose', () => ({ sections: [{ id: 'intro', text: 'Sos Claude.', scope: 'shared' }] }))
-  on('command.run', () => ({ text: '' }))
-  const composeInput = {
-    model: 'opus',
-    promptModel: 'opus',
-    surfaces: [],
-    tools: [],
-    outputStyle: null,
-    traits: [],
-  } as const
-
-  const enabled = await $.prompt.compose(composeInput)
-  const resumeSection = enabled.sections.find(section => section.id.endsWith(':resume'))
-  expect(resumeSection?.text).toMatch(/fijate en el historial si ya corrió/)
-  expect(enabled.sections[0]?.id).toBe('intro')
-
-  await $.command.run({
-    command: 'network-retry',
-    args: 'off',
-    origin: { kind: 'composer' },
-    presentation: { isFullscreen: false, columns: 80 },
-  })
-  const disabled = await $.prompt.compose(composeInput)
-  expect(disabled.sections.map(section => section.id)).toEqual(['intro'])
-})
-
-test('un error que fallaría igual no manda "go"', async ($, on) => {
+test('un error que fallaría igual no se reintenta', async ($, on) => {
   const { clock, submittedTexts, toasts } = setUpEngine(on)
 
   for (const errorKind of ['invalid_request', 'authentication_failed', 'billing_error'] as const) {
@@ -239,7 +213,7 @@ test('un error que fallaría igual no manda "go"', async ($, on) => {
   expect(toasts[0]).toMatch(/invalid_request/)
 })
 
-test('un StopFailure no reintentable que llega tarde cancela el "go" pendiente', async ($, on) => {
+test('un StopFailure no reintentable que llega tarde cancela el reintento pendiente', async ($, on) => {
   const { clock, submittedTexts } = setUpEngine(on)
 
   await $.turn.start({ text: 'hacé algo', turnId: 'turn-1' })
@@ -250,14 +224,14 @@ test('un StopFailure no reintentable que llega tarde cancela el "go" pendiente',
   expect(submittedTexts).toEqual([])
 })
 
-test('un error transitorio sí manda "go" y el turno siguiente limpia el tipo', async ($, on) => {
+test('un error transitorio sí se reintenta y el turno siguiente limpia el tipo', async ($, on) => {
   const { clock, submittedTexts } = setUpEngine(on)
 
   await $.turn.start({ text: 'hacé algo', turnId: 'turn-1' })
   await $.classic.StopFailure({ error: 'overloaded' })
   await $.turn.complete(ERRORED_TURN)
   await clock.advance(FIRST_GO_DELAY_MS)
-  expect(submittedTexts).toEqual(['go'])
+  expect(submittedTexts).toEqual(['resume'])
 
   // Un turno con invalid_request y después otro que se corta sin tipo: el
   // segundo se reintenta porque turn.start limpió el tipo anterior.
@@ -267,5 +241,5 @@ test('un error transitorio sí manda "go" y el turno siguiente limpia el tipo', 
   await $.turn.start({ text: 'go', turnId: 'turn-3' })
   await $.turn.complete({ ...ERRORED_TURN, turnId: 'turn-3' })
   await clock.advance(FIRST_GO_DELAY_MS * 2)
-  expect(submittedTexts).toEqual(['go', 'go'])
+  expect(submittedTexts).toEqual(['resume', 'resume'])
 })

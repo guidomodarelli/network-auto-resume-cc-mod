@@ -2,7 +2,6 @@ import { atom, read, update } from 'claude-code'
 import type {
   EngineInterface,
   ModelApiError,
-  PromptComposeSection,
   Register,
   Timer,
   TurnStepResult,
@@ -23,8 +22,9 @@ import { formatStatusText, formatToggleText, parseStatusText, parseToggleText } 
  *    que llegue cualquier pedazo de respuesta, la reenvía en el acto, sin
  *    mensaje nuevo. Si ya llegó algo, no la reenvía: el texto o la tool call
  *    parcial quedarían duplicados.
- * 2. Al terminar el turno en error (`turn.complete`): manda `go` casi al
- *    instante (1s, luego 2s, 4s… con tope) para que el modelo siga.
+ * 2. Al terminar el turno en error (`turn.complete`): casi al instante (1s,
+ *    luego 2s, 4s… con tope) manda un mensaje que le pide al modelo seguir
+ *    donde quedó sin repetir lo que ya hizo.
  *
  * Solo reintenta errores transitorios: el tipo que Claude Code le da al error
  * (`classic.StopFailure`) descarta los que fallarían igual en cada intento
@@ -45,33 +45,27 @@ const MAX_IN_TURN_RESENDS = 2
 /** Pausa antes de cada reenvío dentro del turno (cuenta en el presupuesto del hook). */
 const IN_TURN_RESEND_DELAY_MS = 750
 
-/** Mensajes `go` seguidos antes de rendirse y avisar. */
+/** Reintentos seguidos antes de rendirse y avisar. */
 const MAX_CONSECUTIVE_RETRIES = 5
-/** Espera antes del primer `go`; se duplica en cada intento seguido. */
+/** Espera antes del primer reintento; se duplica en cada intento seguido. */
 const BASE_RETRY_DELAY_MS = 1_000
-/** Tope de la espera entre mensajes `go`. */
+/** Tope de la espera entre reintentos. */
 const MAX_RETRY_DELAY_MS = 20_000
 const LONG_TOAST_TIMEOUT_MS = 15_000
 
-const RESUME_PROMPT = 'go'
-
 /**
- * Sección del system prompt que explica el `go`: el motor no deja que un
- * plugin le agregue contexto oculto a un prompt que manda él mismo.
+ * Lo que el mod manda para retomar: la instrucción entera va en el mensaje,
+ * porque el motor no deja sumarle contexto oculto a un prompt del propio
+ * plugin y puede bloquear una sección agregada al system prompt.
  */
-const RESUME_INSTRUCTIONS_SECTION = {
-  id: 'network-auto-resume-cc-mod:resume',
-  scope: 'session',
-  text:
-    'Si recibís un mensaje "go" del plugin network-auto-resume-cc-mod, tu respuesta anterior ' +
-    'se cortó por un error de red o de la API. Seguí donde quedaste sin repetir lo que ya ' +
-    'escribiste. Si ibas a ejecutar una herramienta, fijate en el historial si ya corrió antes ' +
-    'de repetirla, sobre todo si tiene efectos.',
-} as const satisfies PromptComposeSection
+const RESUME_PROMPT =
+  'Tu respuesta anterior se cortó por un error de red o de la API. ' +
+  'Seguí donde quedaste sin repetir lo que ya hiciste. ' +
+  'Si ibas a correr una herramienta, fijate en el historial si ya corrió antes de repetirla.'
 
 /**
  * Tipos de error de Claude Code que fallarían igual en cada intento: el mod no
- * manda `go` por ellos. El resto (`server_error`, `overloaded`, `rate_limit`,
+ * reintenta por ellos. El resto (`server_error`, `overloaded`, `rate_limit`,
  * `unknown`, un corte de red sin tipo) se reintenta.
  */
 const NON_RETRYABLE_ERROR_KINDS: readonly ModelApiError[] = [
@@ -97,7 +91,7 @@ const bannerAtom = atom({ plugin: 'network-auto-resume-cc-mod', key: 'banner' } 
 const spinnerFrameAtom = atom({ plugin: 'network-auto-resume-cc-mod', key: 'spinnerFrame' } as const, 0)
 
 /**
- * Calcula la espera antes del `go` número `attemptNumber` (desde 1).
+ * Calcula la espera antes del reintento número `attemptNumber` (desde 1).
  */
 export function retryDelayMs(attemptNumber: number): number {
   return Math.min(BASE_RETRY_DELAY_MS * 2 ** (attemptNumber - 1), MAX_RETRY_DELAY_MS)
@@ -117,9 +111,9 @@ function isMissingResponse(result: TurnStepResult): boolean {
   return result.stopReason === null && result.answer === '' && result.toolUses.length === 0
 }
 
-/** `go` programado; se pierde al recargar el mod, a propósito. */
+/** Reintento programado; se pierde al recargar el mod, a propósito. */
 let pendingRetry: Timer | undefined
-/** Cuándo dispara el `go` programado, en el reloj del motor. */
+/** Cuándo dispara el reintento programado, en el reloj del motor. */
 let pendingRetryDueAtMs: number | undefined
 /** Avanza el spinner de la banda mientras se ve. */
 let spinnerTimer: Timer | undefined
@@ -171,7 +165,7 @@ async function scheduleRetry($: EngineInterface) {
   if (previousRetries >= MAX_CONSECUTIVE_RETRIES) {
     await hideBanner($)
     $.ui.toast(
-      `${EMOJI.gaveUp} ${PLUGIN_NAME}: ${MAX_CONSECUTIVE_RETRIES} reintentos seguidos fallaron; revisá la red o CLI Proxy API y escribí "go" a mano.`,
+      `${EMOJI.gaveUp} ${PLUGIN_NAME}: ${MAX_CONSECUTIVE_RETRIES} reintentos seguidos fallaron; revisá la red o CLI Proxy API y pedile que siga a mano.`,
       { timeoutMs: LONG_TOAST_TIMEOUT_MS },
     )
     await update($, consecutiveRetriesAtom, () => 0)
@@ -309,22 +303,13 @@ export const register: Register = on => {
     }
   })
 
-  // Un prompt del usuario, del bridge o de otro plugin reemplaza el `go`
-  // pendiente. El `go` del propio mod no pasa por acá: el motor saltea los
+  // Un prompt del usuario, del bridge o de otro plugin reemplaza el
+  // reintento pendiente. El mensaje del propio mod no pasa por acá: el motor saltea los
   // hooks del plugin que hace la llamada.
   on('prompt.submit', async ($, e, next) => {
     await resetRetries($)
 
     return next(e)
-  })
-
-  // Le explica al modelo qué es un `go` de este mod, para que siga sin
-  // repetir texto ni herramientas que ya corrieron.
-  on('prompt.compose', async ($, e, next) => {
-    const composed = await next(e)
-    if (!(await read($, isEnabledAtom))) return composed
-
-    return { sections: [...composed.sections, RESUME_INSTRUCTIONS_SECTION] }
   })
 
   on('turn.start', async ($, e, next) => {
@@ -346,7 +331,7 @@ export const register: Register = on => {
     return next(e)
   })
 
-  // Capa 2: el turno murió en error igual; mandar `go`.
+  // Capa 2: el turno murió en error igual; pedirle al modelo que siga.
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
 
@@ -356,7 +341,7 @@ export const register: Register = on => {
     if (e.reason === 'answer') {
       const retriesBeforeAnswer = await read($, consecutiveRetriesAtom)
       await resetRetries($)
-      if (retriesBeforeAnswer > 0) $.ui.toast(`${EMOJI.recovered} Respuesta retomada tras ${retriesBeforeAnswer} "go"`)
+      if (retriesBeforeAnswer > 0) $.ui.toast(`${EMOJI.recovered} Respuesta retomada tras ${retriesBeforeAnswer} ${retriesBeforeAnswer === 1 ? 'reintento' : 'reintentos'}`)
     } else if (e.reason === 'aborted') {
       await resetRetries($)
     } else if (e.reason === 'error' && (await read($, isEnabledAtom))) {

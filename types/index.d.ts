@@ -3,7 +3,7 @@ export type ConsecutiveRetries = number
 
 /**
  * Lo que muestra la banda sobre el prompt mientras el mod espera algo real:
- * un reenvío dentro del turno o el `go` programado.
+ * un reenvío dentro del turno o el reintento programado.
  */
 export type RetryBanner =
   | { kind: 'resending'; attempt: number; maxAttempts: number }

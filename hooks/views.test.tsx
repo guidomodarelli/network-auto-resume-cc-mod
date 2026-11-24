@@ -119,7 +119,7 @@ test('on y off se dibujan como una línea de color', async $ => {
   }
 })
 
-test('mientras espera el "go", la banda gira y cuenta hacia atrás', async ($, on) => {
+test('mientras espera el reintento, la banda gira y cuenta hacia atrás', async ($, on) => {
   const { clock } = setUpEngine(on)
 
   const quiet = await $.ui.mount(abovePrompt('terminal'))
@@ -129,7 +129,7 @@ test('mientras espera el "go", la banda gira y cuenta hacia atrás', async ($, o
   await $.turn.complete(ERRORED_TURN)
   for (const surface of SURFACES) {
     const ui = await $.ui.mount(abovePrompt(surface))
-    expect((await ui.find({ type: 'Text', text: /Respuesta cortada/ }))?.text).toMatch(/⏳ .*"go" 1\/5 en 1 s/)
+    expect((await ui.find({ type: 'Text', text: /Respuesta cortada/ }))?.text).toMatch(/⏳ .*reintento 1\/5 en 1 s/)
     await ui.unmount()
   }
 
@@ -142,19 +142,19 @@ test('mientras espera el "go", la banda gira y cuenta hacia atrás', async ($, o
   expect(frameAfter?.text).not.toBe(frameBefore?.text)
   await ui.unmount()
 
-  // Al disparar el `go`, la banda desaparece.
+  // Al disparar el reintento, la banda desaparece.
   await clock.advance(1_000)
   const after = await $.ui.mount(abovePrompt('terminal'))
   expect(await after.find({ type: 'Text', text: /Respuesta cortada/ })).toBeUndefined()
   await after.unmount()
 })
 
-test('una respuesta que llega después de un "go" avisa que se retomó', async ($, on) => {
+test('una respuesta que llega después de un reintento avisa que se retomó', async ($, on) => {
   const { clock, toasts } = setUpEngine(on)
 
   await $.turn.complete(ERRORED_TURN)
   await clock.advance(1_000)
   await $.turn.complete({ ...ERRORED_TURN, reason: 'answer', answer: 'listo' })
 
-  expect(toasts).toEqual(['✅ Respuesta retomada tras 1 "go"'])
+  expect(toasts).toEqual(['✅ Respuesta retomada tras 1 reintento'])
 })

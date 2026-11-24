@@ -54,14 +54,14 @@ function statusRows(snapshot: StatusSnapshot): StatusRow[] {
     {
       key: 'retries',
       glyph: GLYPHS.retries,
-      label: '"go" seguidos',
+      label: 'Reintentos',
       value: `${retryMeter(snapshot.consecutiveRetries, snapshot.maxRetries)}  ${snapshot.consecutiveRetries}/${snapshot.maxRetries}`,
       color: retriesColor(snapshot),
     },
     {
       key: 'pending',
       glyph: GLYPHS.pending,
-      label: '"go" pendiente',
+      label: 'Pendiente',
       value: snapshot.pendingRetryInSeconds === null ? 'no' : `sí, en ${snapshot.pendingRetryInSeconds} s`,
       color: snapshot.pendingRetryInSeconds === null ? PALETTE.idle : PALETTE.attention,
     },
