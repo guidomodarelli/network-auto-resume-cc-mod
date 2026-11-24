@@ -8,12 +8,16 @@ import type {
   TurnStepResult,
 } from 'claude-code'
 
-import type { ConsecutiveRetries } from '../types'
+import type { ConsecutiveRetries, RetryBanner } from '../types'
+import { EMOJI, SPINNER_INTERVAL_MS } from './look'
+import { RetryBand, secondsUntil } from './retry-band'
+import { StatusCard, ToggleLine } from './status-card'
+import { formatStatusText, formatToggleText, parseStatusText, parseToggleText } from './status'
 
 /**
- * network-auto-resume-cc-mod: recupera solo las respuestas que fallan por la red o la
- * API (CLI Proxy API cortando a mitad del stream, "Waiting for Network" que se
- * rinde, 5xx/529). Dos capas:
+ * network-auto-resume-cc-mod: recupera solo las respuestas que fallan por la
+ * red o la API (CLI Proxy API cortando a mitad del stream, "Waiting for
+ * Network" que se rinde, 5xx/529). Dos capas:
  *
  * 1. Dentro del turno (`turn.step`): si la petición al modelo falla antes de
  *    que llegue cualquier pedazo de respuesta, la reenvía en el acto, sin
@@ -25,6 +29,9 @@ import type { ConsecutiveRetries } from '../types'
  * Solo reintenta errores transitorios: el tipo que Claude Code le da al error
  * (`classic.StopFailure`) descarta los que fallarían igual en cada intento
  * (400 / contexto lleno, 401/403, facturación, modelo inexistente).
+ *
+ * Mientras espera, una banda sobre el prompt muestra un spinner y la cuenta
+ * regresiva; `/network-retry status` dibuja una tarjeta con el estado.
  *
  * Un turno que termina bien reinicia el contador; Esc o un prompt del usuario
  * cancelan el reintento pendiente. `/network-retry off` lo apaga.
@@ -44,10 +51,10 @@ const MAX_CONSECUTIVE_RETRIES = 5
 const BASE_RETRY_DELAY_MS = 1_000
 /** Tope de la espera entre mensajes `go`. */
 const MAX_RETRY_DELAY_MS = 20_000
-const GIVE_UP_TOAST_TIMEOUT_MS = 15_000
-const MS_PER_SECOND = 1000
+const LONG_TOAST_TIMEOUT_MS = 15_000
 
 const RESUME_PROMPT = 'go'
+
 /**
  * Sección del system prompt que explica el `go`: el motor no deja que un
  * plugin le agregue contexto oculto a un prompt que manda él mismo.
@@ -85,6 +92,9 @@ const consecutiveRetriesAtom = atom(
   { plugin: 'network-auto-resume-cc-mod', key: 'consecutiveRetries' } as const,
   initialRetries,
 )
+const noBanner: RetryBanner | null = null
+const bannerAtom = atom({ plugin: 'network-auto-resume-cc-mod', key: 'banner' } as const, noBanner)
+const spinnerFrameAtom = atom({ plugin: 'network-auto-resume-cc-mod', key: 'spinnerFrame' } as const, 0)
 
 /**
  * Calcula la espera antes del `go` número `attemptNumber` (desde 1).
@@ -94,55 +104,75 @@ export function retryDelayMs(attemptNumber: number): number {
 }
 
 /**
- * Una respuesta que no llegó: sin motivo de parada y sin texto ni tool calls.
- */
-function isMissingResponse(result: TurnStepResult): boolean {
-  return result.stopReason === null && result.answer === '' && result.toolUses.length === 0
-}
-
-/**
  * Si un tipo de error es de los que no vale la pena reintentar.
  */
 export function isNonRetryableError(errorKind: ModelApiError | undefined): boolean {
   return errorKind !== undefined && NON_RETRYABLE_ERROR_KINDS.includes(errorKind)
 }
 
+/**
+ * Una respuesta que no llegó: sin motivo de parada y sin texto ni tool calls.
+ */
+function isMissingResponse(result: TurnStepResult): boolean {
+  return result.stopReason === null && result.answer === '' && result.toolUses.length === 0
+}
+
 /** `go` programado; se pierde al recargar el mod, a propósito. */
 let pendingRetry: Timer | undefined
+/** Cuándo dispara el `go` programado, en el reloj del motor. */
+let pendingRetryDueAtMs: number | undefined
+/** Avanza el spinner de la banda mientras se ve. */
+let spinnerTimer: Timer | undefined
 /**
  * Tipo del último error del turno principal, según `classic.StopFailure`;
  * se limpia al empezar cada turno.
  */
 let lastErrorKind: ModelApiError | undefined
 
-function announceSkippedRetry($: EngineInterface, errorKind: ModelApiError) {
-  $.ui.status(undefined)
-  $.ui.toast(
-    `${PLUGIN_NAME}: no reintento un error "${errorKind}", fallaría igual. Revisalo y seguí a mano.`,
-    { timeoutMs: GIVE_UP_TOAST_TIMEOUT_MS },
-  )
+async function showBanner($: EngineInterface, banner: RetryBanner) {
+  await update($, bannerAtom, () => banner)
+  if (spinnerTimer !== undefined) return
+  spinnerTimer = $.clock.every(SPINNER_INTERVAL_MS, () => {
+    void update($, spinnerFrameAtom, frame => frame + 1)
+  })
 }
 
-function cancelPendingRetry($: EngineInterface) {
+async function hideBanner($: EngineInterface) {
+  if (spinnerTimer !== undefined) {
+    spinnerTimer.cancel()
+    spinnerTimer = undefined
+  }
+  await update($, bannerAtom, () => null)
+}
+
+async function cancelPendingRetry($: EngineInterface) {
   if (pendingRetry === undefined) return
   pendingRetry.cancel()
   pendingRetry = undefined
-  $.ui.status(undefined)
+  pendingRetryDueAtMs = undefined
+  await hideBanner($)
 }
 
 async function resetRetries($: EngineInterface) {
-  cancelPendingRetry($)
+  await cancelPendingRetry($)
   await update($, consecutiveRetriesAtom, () => 0)
+}
+
+async function announceSkippedRetry($: EngineInterface, errorKind: ModelApiError) {
+  await hideBanner($)
+  $.ui.toast(`${EMOJI.skipped} ${PLUGIN_NAME}: no reintento un error "${errorKind}", fallaría igual. Revisalo y seguí a mano.`, {
+    timeoutMs: LONG_TOAST_TIMEOUT_MS,
+  })
 }
 
 async function scheduleRetry($: EngineInterface) {
   const previousRetries = await read($, consecutiveRetriesAtom)
 
   if (previousRetries >= MAX_CONSECUTIVE_RETRIES) {
-    $.ui.status(undefined)
+    await hideBanner($)
     $.ui.toast(
-      `${PLUGIN_NAME}: ${MAX_CONSECUTIVE_RETRIES} reintentos seguidos fallaron; revisá la red o CLI Proxy API y escribí "go" a mano.`,
-      { timeoutMs: GIVE_UP_TOAST_TIMEOUT_MS },
+      `${EMOJI.gaveUp} ${PLUGIN_NAME}: ${MAX_CONSECUTIVE_RETRIES} reintentos seguidos fallaron; revisá la red o CLI Proxy API y escribí "go" a mano.`,
+      { timeoutMs: LONG_TOAST_TIMEOUT_MS },
     )
     await update($, consecutiveRetriesAtom, () => 0)
     return
@@ -152,18 +182,23 @@ async function scheduleRetry($: EngineInterface) {
   const delayMs = retryDelayMs(attemptNumber)
   await update($, consecutiveRetriesAtom, () => attemptNumber)
 
-  $.ui.status(
-    `⟳ Respuesta cortada: "go" ${attemptNumber}/${MAX_CONSECUTIVE_RETRIES} en ${Math.round(delayMs / MS_PER_SECOND)}s (/${COMMAND_NAME} off para frenar)`,
-  )
+  pendingRetryDueAtMs = (await $.clock.now()) + delayMs
+  await showBanner($, {
+    kind: 'waiting',
+    attempt: attemptNumber,
+    maxAttempts: MAX_CONSECUTIVE_RETRIES,
+    dueAtMs: pendingRetryDueAtMs,
+  })
 
   pendingRetry = $.clock.after(delayMs, () => {
     pendingRetry = undefined
+    pendingRetryDueAtMs = undefined
+    void hideBanner($)
     // StopFailure puede llegar después de turn.complete: se mira otra vez acá.
     if (lastErrorKind !== undefined && isNonRetryableError(lastErrorKind)) {
-      announceSkippedRetry($, lastErrorKind)
+      void announceSkippedRetry($, lastErrorKind)
       return
     }
-    $.ui.status(undefined)
     void $.prompt.submit({ text: RESUME_PROMPT })
   })
 }
@@ -187,19 +222,48 @@ export const register: Register = on => {
       await update($, isEnabledAtom, () => isEnabled)
       if (!isEnabled) await resetRetries($)
 
-      return { text: `Reanudación automática ${isEnabled ? 'activada' : 'desactivada'}.` }
+      return { text: formatToggleText({ isEnabled }), isTextDisplayOnly: true }
     }
 
-    const isEnabled = await read($, isEnabledAtom)
-    const retries = await read($, consecutiveRetriesAtom)
+    const nowMs = await $.clock.now()
+    const text = formatStatusText({
+      isEnabled: await read($, isEnabledAtom),
+      consecutiveRetries: await read($, consecutiveRetriesAtom),
+      maxRetries: MAX_CONSECUTIVE_RETRIES,
+      pendingRetryInSeconds:
+        pendingRetryDueAtMs === undefined ? null : secondsUntil(pendingRetryDueAtMs, nowMs),
+      lastErrorKind: lastErrorKind ?? null,
+      isLastErrorRetryable: !isNonRetryableError(lastErrorKind),
+    })
 
-    return {
-      text:
-        `Reanudación automática: ${isEnabled ? 'activada' : 'desactivada'}. ` +
-        `"go" seguidos: ${retries}/${MAX_CONSECUTIVE_RETRIES}. ` +
-        `"go" pendiente: ${pendingRetry === undefined ? 'no' : 'sí'}. ` +
-        `Último error: ${lastErrorKind ?? 'ninguno'}.`,
-    }
+    return { text, isTextDisplayOnly: true }
+  })
+
+  // La fila del comando: tarjeta para `status`, línea de color para `on`/`off`.
+  on('ui.render', { component: 'CommandOutput', props: { command: COMMAND_NAME } }, ($, e, next) => {
+    const elements = $.ui.resolve(e)
+    const snapshot = parseStatusText(e.props.text)
+    if (snapshot !== undefined) return <StatusCard elements={elements} snapshot={snapshot} />
+
+    const toggle = parseToggleText(e.props.text)
+    if (toggle !== undefined) return <ToggleLine elements={elements} result={toggle} />
+
+    return next(e)
+  })
+
+  // La banda sobre el prompt mientras hay una espera real.
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    const banner = await read($, bannerAtom)
+    if (banner === null || e.props.hasSurvey) return next(e)
+
+    return (
+      <RetryBand
+        elements={$.ui.resolve(e)}
+        banner={banner}
+        spinnerFrame={await read($, spinnerFrameAtom)}
+        nowMs={await $.clock.now()}
+      />
+    )
   })
 
   // Capa 1: reenviar la petición dentro del mismo turno si falló sin mandar nada.
@@ -217,24 +281,31 @@ export const register: Register = on => {
         const stream = next(e)
         let step = await stream.next()
         while (step.done !== true) {
+          if (!hasYieldedChunk && resendNumber > 0) await hideBanner($)
           hasYieldedChunk = true
           yield step.value
           step = await stream.next()
         }
         result = step.value
       } catch (streamError) {
-        if (hasYieldedChunk || isLastAttempt || next.signal.aborted) throw streamError
+        if (hasYieldedChunk || isLastAttempt || next.signal.aborted) {
+          await hideBanner($)
+          throw streamError
+        }
+        await showBanner($, { kind: 'resending', attempt: resendNumber + 1, maxAttempts: MAX_IN_TURN_RESENDS })
         await $.clock.sleep(IN_TURN_RESEND_DELAY_MS, { signal: next.signal })
         continue
       }
 
       const canResend =
         !hasYieldedChunk && !isLastAttempt && !next.signal.aborted && isMissingResponse(result)
-      if (!canResend) return result
+      if (!canResend) {
+        if (resendNumber > 0) await hideBanner($)
+        return result
+      }
 
-      $.ui.status(`⟳ Petición fallida: reenviando (${resendNumber + 1}/${MAX_IN_TURN_RESENDS})…`)
+      await showBanner($, { kind: 'resending', attempt: resendNumber + 1, maxAttempts: MAX_IN_TURN_RESENDS })
       await $.clock.sleep(IN_TURN_RESEND_DELAY_MS, { signal: next.signal })
-      $.ui.status(undefined)
     }
   })
 
@@ -268,8 +339,8 @@ export const register: Register = on => {
 
     lastErrorKind = e.error
     if (pendingRetry !== undefined && isNonRetryableError(e.error)) {
-      cancelPendingRetry($)
-      announceSkippedRetry($, e.error)
+      await cancelPendingRetry($)
+      await announceSkippedRetry($, e.error)
     }
 
     return next(e)
@@ -282,12 +353,16 @@ export const register: Register = on => {
     // Solo el loop principal: un subagente que falla lo maneja su llamador.
     if (e.agentId !== undefined) return result
 
-    if (e.reason === 'answer' || e.reason === 'aborted') {
+    if (e.reason === 'answer') {
+      const retriesBeforeAnswer = await read($, consecutiveRetriesAtom)
+      await resetRetries($)
+      if (retriesBeforeAnswer > 0) $.ui.toast(`${EMOJI.recovered} Respuesta retomada tras ${retriesBeforeAnswer} "go"`)
+    } else if (e.reason === 'aborted') {
       await resetRetries($)
     } else if (e.reason === 'error' && (await read($, isEnabledAtom))) {
-      cancelPendingRetry($)
+      await cancelPendingRetry($)
       if (lastErrorKind !== undefined && isNonRetryableError(lastErrorKind)) {
-        announceSkippedRetry($, lastErrorKind)
+        await announceSkippedRetry($, lastErrorKind)
       } else {
         await scheduleRetry($)
       }

@@ -13,6 +13,14 @@ El `go` es lo único que ves. El mod suma al system prompt una sección corta qu
 
 Un turno que termina bien reinicia el contador. Con Esc o con un prompt tuyo se cancela el `go` pendiente. Los errores de los subagentes no se reintentan.
 
+## Cómo se ve
+
+- **Banda sobre el prompt** mientras hay una espera real: un spinner que gira con `⏳ Respuesta cortada: "go" 1/5 en 3 s` y la cuenta regresiva, o `🔁 Petición fallida: reenviando 1/2` cuando reenvía dentro del turno. Desaparece apenas termina la espera.
+- **Toasts:** `✅ Respuesta retomada`, `⛔` cuando un error no se reintenta y `🛑` cuando se rinde.
+- **`/network-retry status`:** una tarjeta con borde redondeado, el medidor de reintentos (`●●○○○  2/5`), el `go` pendiente, el último error y el atajo para prender o apagar el mod.
+
+Los colores salen del tema de Claude Code (marca naranja, verde, amarillo y rojo de estado), así que se adaptan a modo claro, oscuro y daltónico. Cada estado lleva ícono y palabra: se entiende igual sin color.
+
 ## Comando
 
 ```
