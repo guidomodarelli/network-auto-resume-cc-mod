@@ -15,13 +15,27 @@ Un turno que termina bien reinicia el contador. Con Esc o con un prompt tuyo se 
 /network-retry on | off | status
 ```
 
-## Instalación local
+## Instalación
 
-```powershell
-claude --plugin-dir C:\Users\guido\ghq\projects\network-auto-resume-cc-mod
+El repo es privado: necesitás acceso en GitHub y `gh` o git configurados con tu cuenta.
+
+En el prompt de Claude Code:
+
+```
+/plugin install network-auto-resume-cc-mod --marketplace guidomodarelli/network-auto-resume-cc-mod
 ```
 
-También se puede sumar la carpeta a `CLAUDE_CODE_PLUGIN_DIRS`.
+Respondé `y` para agregar el marketplace y elegí el scope. Desde una terminal:
+
+```powershell
+claude plugin install network-auto-resume-cc-mod --marketplace guidomodarelli/network-auto-resume-cc-mod
+```
+
+Para probar una copia local sin instalarla:
+
+```powershell
+claude --plugin-dir <carpeta del mod>
+```
 
 ## Desarrollo
 

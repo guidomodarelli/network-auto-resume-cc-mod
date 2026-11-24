@@ -1,0 +1,5 @@
+{
+  "name": "network-auto-resume-cc-mod",
+  "owner": { "name": "guidomodarelli" },
+  "plugins": [{ "name": "network-auto-resume-cc-mod", "source": "./" }]
+}
