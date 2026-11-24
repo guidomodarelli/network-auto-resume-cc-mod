@@ -7,7 +7,9 @@ Mod de Claude Code que retoma solo la respuesta cuando se corta por la red o por
 1. **Dentro del turno.** Si una petición al modelo falla antes de que llegue cualquier parte de la respuesta, el mod la reenvía enseguida (después de 0,75 s, hasta 2 veces), sin mandar ningún mensaje.
 2. **Al terminar el turno con error.** Si igual se cortó, o si ya había llegado parte de la respuesta (reenviarla duplicaría el texto o la tool call), al segundo le manda al modelo un mensaje: _«Tu respuesta anterior se cortó por un error de red o de la API. Seguí donde quedaste sin repetir lo que ya hiciste. Si ibas a correr una herramienta, fijate en el historial si ya corrió antes de repetirla.»_ Si vuelve a fallar, espera 2 s, 4 s, 8 s y 16 s, y después del quinto intento seguido avisa con un toast.
 
-Solo reintenta errores transitorios. Con el tipo que Claude Code le asigna a cada error (`StopFailure`), descarta los que fallarían igual en cada intento, avisa con un toast y no reintenta: `invalid_request` (400, contexto lleno), `authentication_failed`, `billing_error`, `model_not_found`, entre otros. `server_error`, `overloaded`, `rate_limit` y los cortes de red sin tipo sí se reintentan.
+Reintenta cualquier error de la API, salvo los que fallarían igual en cada intento. Con el tipo que Claude Code le asigna a cada error (`StopFailure`), no reintenta los de cuenta, credenciales o facturación (`authentication_failed`, `billing_error`, `model_not_found`, entre otros) ni el contexto lleno; en esos casos avisa con un toast. Un `invalid_request` (400) sí se reintenta, porque CLI Proxy API suele devolver así una falla pasajera del proveedor de upstream; solo se descarta cuando el detalle dice que el contexto se llenó.
+
+También reintenta cuando Claude Code muestra el "API Error: …" como si fuera la respuesta del turno, y cuando el aviso del error llega después de que el turno terminó.
 
 La instrucción va entera en el mensaje y no en el system prompt: Claude Code puede bloquear que un mod modifique el system prompt, y no deja sumarle contexto oculto a un mensaje del propio mod.
 

@@ -201,16 +201,22 @@ test('los reenvíos dentro del turno tienen tope', async ($, on) => {
 test('un error que fallaría igual no se reintenta', async ($, on) => {
   const { clock, submittedTexts, toasts } = setUpEngine(on)
 
-  for (const errorKind of ['invalid_request', 'authentication_failed', 'billing_error'] as const) {
-    await $.turn.start({ text: 'hacé algo', turnId: `turn-${errorKind}` })
-    await $.classic.StopFailure({ error: errorKind })
+  const permanentErrors = [
+    { error: 'authentication_failed' },
+    { error: 'billing_error' },
+    { error: 'invalid_request', error_details: 'prompt is too long: 210000 tokens > 200000 maximum' },
+  ] as const
+  for (const failure of permanentErrors) {
+    await $.turn.start({ text: 'hacé algo', turnId: `turn-${failure.error}` })
+    await $.classic.StopFailure(failure)
     await $.turn.complete(ERRORED_TURN)
     await clock.advance(FIRST_GO_DELAY_MS * 4)
   }
 
   expect(submittedTexts).toEqual([])
   expect(toasts.length).toBe(3)
-  expect(toasts[0]).toMatch(/invalid_request/)
+  expect(toasts[0]).toMatch(/authentication_failed/)
+  expect(toasts[2]).toMatch(/invalid_request/)
 })
 
 test('un StopFailure no reintentable que llega tarde cancela el reintento pendiente', async ($, on) => {
@@ -218,7 +224,7 @@ test('un StopFailure no reintentable que llega tarde cancela el reintento pendie
 
   await $.turn.start({ text: 'hacé algo', turnId: 'turn-1' })
   await $.turn.complete(ERRORED_TURN)
-  await $.classic.StopFailure({ error: 'invalid_request' })
+  await $.classic.StopFailure({ error: 'authentication_failed' })
   await clock.advance(FIRST_GO_DELAY_MS * 4)
 
   expect(submittedTexts).toEqual([])
@@ -233,13 +239,61 @@ test('un error transitorio sí se reintenta y el turno siguiente limpia el tipo'
   await clock.advance(FIRST_GO_DELAY_MS)
   expect(submittedTexts).toEqual(['resume'])
 
-  // Un turno con invalid_request y después otro que se corta sin tipo: el
+  // Un turno con authentication_failed y después otro que se corta sin tipo: el
   // segundo se reintenta porque turn.start limpió el tipo anterior.
   await $.turn.start({ text: 'otra cosa', turnId: 'turn-2' })
-  await $.classic.StopFailure({ error: 'invalid_request' })
+  await $.classic.StopFailure({ error: 'authentication_failed' })
   await $.turn.complete({ ...ERRORED_TURN, turnId: 'turn-2' })
   await $.turn.start({ text: 'go', turnId: 'turn-3' })
   await $.turn.complete({ ...ERRORED_TURN, turnId: 'turn-3' })
   await clock.advance(FIRST_GO_DELAY_MS * 2)
   expect(submittedTexts).toEqual(['resume', 'resume'])
+})
+
+test('un 400 de CLI Proxy API sin contexto lleno se reintenta', async ($, on) => {
+  const { clock, submittedTexts } = setUpEngine(on)
+
+  await $.turn.start({ text: 'hacé algo', turnId: 'turn-1' })
+  await $.classic.StopFailure({ error: 'invalid_request', error_details: 'upstream provider returned an error' })
+  await $.turn.complete(ERRORED_TURN)
+  await clock.advance(FIRST_GO_DELAY_MS)
+
+  expect(submittedTexts).toEqual(['resume'])
+})
+
+test('un "API Error" que Claude Code cierra como respuesta se reintenta', async ($, on) => {
+  const { clock, submittedTexts } = setUpEngine(on)
+
+  await $.turn.start({ text: 'hacé algo', turnId: 'turn-1' })
+  await $.turn.complete({ ...ANSWERED_TURN, answer: 'API Error: 500 {"type":"error","error":{"type":"api_error"}}' })
+  await clock.advance(FIRST_GO_DELAY_MS)
+  expect(submittedTexts).toEqual(['resume'])
+
+  // Con StopFailure y un turno cerrado como respuesta normal, también.
+  await $.turn.start({ text: 'hacé algo', turnId: 'turn-2' })
+  await $.classic.StopFailure({ error: 'server_error' })
+  await $.turn.complete({ ...ANSWERED_TURN, turnId: 'turn-2' })
+  await clock.advance(FIRST_GO_DELAY_MS * 2)
+  expect(submittedTexts).toEqual(['resume', 'resume'])
+})
+
+test('un StopFailure transitorio que llega después del fin del turno reintenta', async ($, on) => {
+  const { clock, submittedTexts } = setUpEngine(on)
+
+  await $.turn.start({ text: 'hacé algo', turnId: 'turn-1' })
+  await $.turn.complete(ANSWERED_TURN)
+  await $.classic.StopFailure({ error: 'overloaded' })
+  await clock.advance(FIRST_GO_DELAY_MS)
+
+  expect(submittedTexts).toEqual(['resume'])
+})
+
+test('un turno normal no reintenta aunque mencione un error', async ($, on) => {
+  const { clock, submittedTexts } = setUpEngine(on)
+
+  await $.turn.start({ text: 'explicame', turnId: 'turn-1' })
+  await $.turn.complete({ ...ANSWERED_TURN, answer: 'Ese "API Error" que viste viene del proxy.' })
+  await clock.advance(FIRST_GO_DELAY_MS * 4)
+
+  expect(submittedTexts).toEqual([])
 })

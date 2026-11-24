@@ -64,21 +64,32 @@ const RESUME_PROMPT =
   'Si ibas a correr una herramienta, fijate en el historial si ya corrió antes de repetirla.'
 
 /**
- * Tipos de error de Claude Code que fallarían igual en cada intento: el mod no
- * reintenta por ellos. El resto (`server_error`, `overloaded`, `rate_limit`,
- * `unknown`, un corte de red sin tipo) se reintenta.
+ * Tipos de error de Claude Code que fallarían igual en cada intento (cuenta,
+ * credenciales, facturación, modelo inexistente): el mod no reintenta por
+ * ellos. El resto (`server_error`, `overloaded`, `rate_limit`, `unknown`, un
+ * corte de red sin tipo) se reintenta.
  */
-const NON_RETRYABLE_ERROR_KINDS: readonly ModelApiError[] = [
+const PERMANENT_ERROR_KINDS: readonly ModelApiError[] = [
   'authentication_failed',
   'oauth_org_not_allowed',
   'account_on_hold',
   'verification_required',
   'billing_error',
-  'invalid_request',
   'model_not_found',
   'max_output_tokens',
   'cloud_credential_error',
 ]
+
+/**
+ * `invalid_request` se reintenta: un proxy como CLI Proxy API suele devolver
+ * como 400 una falla pasajera del proveedor de arriba. Solo no se reintenta
+ * cuando el detalle dice que el contexto se llenó, porque eso no se arregla
+ * esperando.
+ */
+const CONTEXT_LIMIT_DETAILS = /prompt is too long|context (window|length)|maximum context|too many tokens/i
+
+/** La forma en que Claude Code muestra un error de la API como respuesta. */
+const API_ERROR_ANSWER = /^\s*API Error\b/i
 
 const isEnabledAtom = atom({ plugin: 'network-auto-resume-cc-mod', key: 'isEnabled' } as const, true)
 const initialRetries: ConsecutiveRetries = 0
@@ -98,10 +109,14 @@ export function retryDelayMs(attemptNumber: number): number {
 }
 
 /**
- * Si un tipo de error es de los que no vale la pena reintentar.
+ * Si un error es de los que no vale la pena reintentar, por su tipo y, para
+ * `invalid_request`, por su detalle.
  */
-export function isNonRetryableError(errorKind: ModelApiError | undefined): boolean {
-  return errorKind !== undefined && NON_RETRYABLE_ERROR_KINDS.includes(errorKind)
+export function isNonRetryableError(errorKind: ModelApiError | undefined, errorDetails?: string): boolean {
+  if (errorKind === undefined) return false
+  if (errorKind === 'invalid_request') return CONTEXT_LIMIT_DETAILS.test(errorDetails ?? '')
+
+  return PERMANENT_ERROR_KINDS.includes(errorKind)
 }
 
 /**
@@ -122,6 +137,14 @@ let spinnerTimer: Timer | undefined
  * se limpia al empezar cada turno.
  */
 let lastErrorKind: ModelApiError | undefined
+/** El detalle de ese error, cuando Claude Code lo da. */
+let lastErrorDetails: string | undefined
+/** Si el turno principal está corriendo: un StopFailure tardío lo necesita. */
+let isMainTurnRunning = false
+
+function isLastErrorNonRetryable(): boolean {
+  return isNonRetryableError(lastErrorKind, lastErrorDetails)
+}
 
 async function showBanner($: EngineInterface, banner: RetryBanner) {
   await update($, bannerAtom, () => banner)
@@ -189,7 +212,7 @@ async function scheduleRetry($: EngineInterface) {
     pendingRetryDueAtMs = undefined
     void hideBanner($)
     // StopFailure puede llegar después de turn.complete: se mira otra vez acá.
-    if (lastErrorKind !== undefined && isNonRetryableError(lastErrorKind)) {
+    if (lastErrorKind !== undefined && isLastErrorNonRetryable()) {
       void announceSkippedRetry($, lastErrorKind)
       return
     }
@@ -227,7 +250,7 @@ export const register: Register = on => {
       pendingRetryInSeconds:
         pendingRetryDueAtMs === undefined ? null : secondsUntil(pendingRetryDueAtMs, nowMs),
       lastErrorKind: lastErrorKind ?? null,
-      isLastErrorRetryable: !isNonRetryableError(lastErrorKind),
+      isLastErrorRetryable: !isLastErrorNonRetryable(),
     })
 
     return { text, isTextDisplayOnly: true }
@@ -313,7 +336,11 @@ export const register: Register = on => {
   })
 
   on('turn.start', async ($, e, next) => {
-    if (e.agentId === undefined) lastErrorKind = undefined
+    if (e.agentId === undefined) {
+      lastErrorKind = undefined
+      lastErrorDetails = undefined
+      isMainTurnRunning = true
+    }
 
     return next(e)
   })
@@ -323,9 +350,15 @@ export const register: Register = on => {
     if (e.agent_id !== undefined) return next(e)
 
     lastErrorKind = e.error
-    if (pendingRetry !== undefined && isNonRetryableError(e.error)) {
-      await cancelPendingRetry($)
-      await announceSkippedRetry($, e.error)
+    lastErrorDetails = e.error_details
+    if (isLastErrorNonRetryable()) {
+      if (pendingRetry !== undefined) {
+        await cancelPendingRetry($)
+        await announceSkippedRetry($, e.error)
+      }
+    } else if (!isMainTurnRunning && pendingRetry === undefined && (await read($, isEnabledAtom))) {
+      // Llegó después de que el turno terminó como si nada: reintentar igual.
+      await scheduleRetry($)
     }
 
     return next(e)
@@ -337,19 +370,31 @@ export const register: Register = on => {
 
     // Solo el loop principal: un subagente que falla lo maneja su llamador.
     if (e.agentId !== undefined) return result
+    isMainTurnRunning = false
 
-    if (e.reason === 'answer') {
-      const retriesBeforeAnswer = await read($, consecutiveRetriesAtom)
+    // Claude Code puede cerrar como respuesta un turno que murió por un error
+    // de la API: cuenta como error si hubo StopFailure o si la respuesta es
+    // el "API Error: …" que muestra.
+    const isApiError =
+      e.reason === 'error' || lastErrorKind !== undefined || API_ERROR_ANSWER.test(e.answer)
+
+    if (e.reason === 'aborted') {
       await resetRetries($)
-      if (retriesBeforeAnswer > 0) $.ui.toast(`${EMOJI.recovered} Respuesta retomada tras ${retriesBeforeAnswer} ${retriesBeforeAnswer === 1 ? 'reintento' : 'reintentos'}`)
-    } else if (e.reason === 'aborted') {
-      await resetRetries($)
-    } else if (e.reason === 'error' && (await read($, isEnabledAtom))) {
+    } else if (isApiError) {
+      if (!(await read($, isEnabledAtom))) return result
       await cancelPendingRetry($)
-      if (lastErrorKind !== undefined && isNonRetryableError(lastErrorKind)) {
+      if (lastErrorKind !== undefined && isLastErrorNonRetryable()) {
         await announceSkippedRetry($, lastErrorKind)
       } else {
         await scheduleRetry($)
+      }
+    } else {
+      const retriesBeforeAnswer = await read($, consecutiveRetriesAtom)
+      await resetRetries($)
+      if (retriesBeforeAnswer > 0) {
+        $.ui.toast(
+          `${EMOJI.recovered} Respuesta retomada tras ${retriesBeforeAnswer} ${retriesBeforeAnswer === 1 ? 'reintento' : 'reintentos'}`,
+        )
       }
     }
 
