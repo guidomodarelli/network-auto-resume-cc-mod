@@ -17,8 +17,6 @@ Un turno que termina bien reinicia el contador. Con Esc o con un prompt tuyo se 
 
 ## Instalación
 
-El repo es privado: necesitás acceso en GitHub y `gh` o git configurados con tu cuenta.
-
 En el prompt de Claude Code:
 
 ```
